@@ -4,7 +4,7 @@ import os
 import datetime
 import threading
 
-from wave_function_collapse.wfc import WFC
+from .wfc3d import WFC3D
 
 from midvoxio.voxio import write_list_to_vox
 
@@ -28,6 +28,7 @@ BIOME_TABLE = [
 
 def rgb_to_biome(rgb, depth):
     r, g, b = rgb
+    r, g, b = int(r), int(g), int(b)    
     if b > 150 and depth < 64: return "water"
     if r > 210 and g > 210 and b > 210 and depth > 180: return "snow"
     if r > 200 and g > 200 and b < 150 and depth < 140: return "desert"
@@ -121,20 +122,41 @@ def export_to_glb_from_grid(voxel_grid, palette, glb_path, cube_size=1.0):
     return ""
 
 def wfc_generate_chunk(reference_grid, shape, tile_size, seed, edge_constraints=None):
-    wfc = WFC(reference_grid, n=tile_size, shape=shape, ground=0, periodic=False, seed=seed)
-    # Edge constraints can be implemented here if needed in future
-    result = wfc.run()
-    return result
+    output_height, output_width, output_depth = shape
+    print(f"[DEBUG] Generating WFC chunk: shape={shape}, tile_size={tile_size}, seed={seed}")
+    print(f"[DEBUG] Reference grid shape: {reference_grid.shape}")
+    wfc = WFC3D(reference_grid, n=tile_size, out_shape=(output_height, output_width, output_depth), seed=seed)
+    print("[DEBUG] WFC3D instance created.")
+    try:
+        wfc.run()
+    except Exception as e:
+        print(f"[ERROR] Exception during wfc.run(): {e}")
+        raise
+    print("[DEBUG] WFC3D run completed.")
+    try:
+        chunk = wfc.decode_to_voxel_grid()
+    except Exception as e:
+        print(f"[ERROR] Exception during decode_to_voxel_grid: {e}")
+        raise
+    print("[DEBUG] Decoded chunk shape:", chunk.shape)
+    return chunk
 
 def generate_chunk_threaded(ref_grid, shape, tile_size, seed, edge_constraints, vox_path, glb_path, terrain_chunks, idx, edge_list, palette, cube_size):
-    chunk = wfc_generate_chunk(ref_grid, shape, tile_size, seed, edge_constraints)
-    rgba_grid = grid_to_vox_rgba(chunk, palette)
-    write_list_to_vox(rgba_grid, vox_path, palette_arr=palette)
-    glb_file = ""
-    if glb_path and trimesh is not None:
-        glb_file = export_to_glb_from_grid(chunk, palette, glb_path, cube_size)
-    terrain_chunks[idx] = chunk
-    edge_list[idx] = extract_edges_3d(chunk, tile_size)
+    print(f"[THREAD] Starting chunk generation idx={idx}, seed={seed}")
+    try:
+        chunk = wfc_generate_chunk(ref_grid, shape, tile_size, seed, edge_constraints)
+        rgba_grid = grid_to_vox_rgba(chunk, palette)
+        write_list_to_vox(rgba_grid, vox_path, palette_arr=palette)
+        glb_file = ""
+        if glb_path and trimesh is not None:
+            glb_file = export_to_glb_from_grid(chunk, palette, glb_path, cube_size)
+        terrain_chunks[idx] = chunk
+        edge_list[idx] = extract_edges_3d(chunk, tile_size)
+        print(f"[THREAD] Chunk idx={idx} completed successfully.")
+    except Exception as e:
+        print(f"[THREAD ERROR] Exception in chunk idx={idx}: {e}")
+        terrain_chunks[idx] = None
+        edge_list[idx] = None
 
 class WFCTerrain3DNode:
     @classmethod
@@ -161,6 +183,7 @@ class WFCTerrain3DNode:
     CATEGORY = "Procedural"
 
     def run(self, reference_image, biome_mask, output_height, output_width, output_depth, tile_size, chunk_count, seed, export_path, export_glb, glb_base_path, cube_size):
+        print("[NODE] WFCTerrain3DNode.run called")
         ref_img = Image.fromarray((reference_image[0].cpu().numpy()*255).astype(np.uint8))
         if biome_mask is not None and hasattr(biome_mask, "__getitem__"):
             biome_img = Image.fromarray((biome_mask[0].cpu().numpy()*255).astype(np.uint8))
@@ -168,6 +191,7 @@ class WFCTerrain3DNode:
             biome_img = None
         palette = build_palette()
         ref_grid = img_to_biome_array(ref_img, biome_img, output_height, output_width, output_depth)
+        print(f"[NODE] Reference grid shape: {ref_grid.shape}")
         shape = (output_height, output_width, output_depth)
         terrain_chunks = [None]*chunk_count
         vox_paths = [None]*chunk_count
@@ -183,10 +207,12 @@ class WFCTerrain3DNode:
             vox_paths[idx] = vox_path
             glb_paths[idx] = glb_path
             edge_constraints = edge_list[idx-1] if idx > 0 else None
+            print(f"[NODE] Launching thread for chunk idx={idx}")
             t = threading.Thread(target=generate_chunk_threaded, args=(
                 ref_grid, shape, tile_size, seed+idx, edge_constraints, vox_path, glb_path, terrain_chunks, idx, edge_list, palette, cube_size))
             t.start()
             threads.append(t)
         for t in threads:
             t.join()
+        print("[NODE] All threads completed")
         return (terrain_chunks, vox_paths, glb_paths)
