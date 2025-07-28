@@ -59,16 +59,16 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "AutoVoxelScaler": "Auto Voxel Scaler",
-    "DepthToVox": "Depth To Vox",
-    "VoxelPreview": "Voxel Preview",
+    "AutoVoxelScaler": "Auto Voxel Scaler WIP",
+    "DepthToVox": "Depth To Vox SEMI WORKING",
+    "VoxelPreview": "Voxel Preview WIP",
     "VoxelToGLB": "Voxel to .GLB",
-    "MultiViewVoxelFusion": "Multi View Voxel Fusion",
-    "ProceduralChunkedWFC3DTerrain": "Procedural Chunked WFC3D Terrain",
+    "MultiViewVoxelFusion": "Multi View Voxel Fusion SEMI WORKING",
+    "ProceduralChunkedWFC3DTerrain": "Chunk WFC 3D Terrain From Image SEMI WORKING",
     "VoxelModelLoader": "Load Voxel Model",
     "DepthEstimationNode": "Depth Estimation",
     "OptimizedVoxelizationNode": "Voxelization (Optimized)",
     "ShapeCompletionNode": "3D Shape Completion",
-    "VoxelPreviewNode": "Voxel Preview",
-    "WFC3DTerrainGenerator": "WFC 3D Terrain Generator",
+    "VoxelPreviewNode": "Voxel Preview WIP",
+    "WFC3DTerrainGenerator": "WFC 3D Terrain Generator WIP",
 }
