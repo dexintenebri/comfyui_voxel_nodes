@@ -5,6 +5,126 @@ import os
 from sklearn.cluster import KMeans
 import datetime
 
+def prepare_images(rgb_tensor, depth_tensor, resolution):
+    # RGB
+    if rgb_tensor.ndim == 3:
+        if rgb_tensor.shape[0] in (1, 3):
+            rgb = rgb_tensor.transpose(1, 2, 0)
+        elif rgb_tensor.shape[2] in (1, 3):
+            rgb = rgb_tensor
+        else:
+            raise ValueError(f"Unexpected RGB shape: {rgb_tensor.shape}")
+    else:
+        raise ValueError(f"RGB tensor must have 3 dimensions, got {rgb_tensor.ndim}")
+
+    if rgb.shape[2] == 1:
+        rgb = np.repeat(rgb, 3, axis=2)
+    elif rgb.shape[2] != 3:
+        raise ValueError(f"RGB image must have 1 or 3 channels, got {rgb.shape[2]}")
+
+    if rgb.max() <= 1.0:
+        rgb = rgb * 255.0
+    rgb = np.clip(rgb, 0, 255).astype(np.uint8)
+
+    # Depth
+    if depth_tensor.ndim == 3:
+        if depth_tensor.shape[2] == 1:
+            depth = depth_tensor[:, :, 0]
+        else:
+            depth = depth_tensor.mean(axis=2)
+    elif depth_tensor.ndim == 2:
+        depth = depth_tensor
+    else:
+        raise ValueError(f"Depth map must be 2D or 3D, got {depth_tensor.ndim}D")
+
+    if depth.max() <= 1.0:
+        depth = depth * 255.0
+    depth = np.clip(depth, 0, 255).astype(np.uint8)
+
+    rgb_img = Image.fromarray(rgb).resize((resolution, resolution), Image.BILINEAR)
+    rgb = np.array(rgb_img)
+    depth_img = Image.fromarray(depth).resize((resolution, resolution), Image.BILINEAR)
+    depth = np.array(depth_img)
+    return rgb, depth
+
+def render_voxel_view(voxel_grid, view="front"):
+    """
+    Render a 2D RGB image and depth map for a given view.
+    Supported views: "front", "back", "left", "right", "top", "bottom"
+    Returns (rgb_img, depth_img), both np.uint8 arrays.
+    """
+    # axis: (x, y, z, 3)
+    w, h, d, _ = voxel_grid.shape
+    if view == "front":
+        rgb = np.zeros((h, w, 3), dtype=np.uint8)
+        depth = np.zeros((h, w), dtype=np.uint8)
+        for y in range(h):
+            for x in range(w):
+                for z in range(d-1, -1, -1):
+                    color = voxel_grid[x, y, z]
+                    if np.any(color):
+                        rgb[y, x] = color
+                        depth[y, x] = int(255 * (z / (d-1)))
+                        break
+    elif view == "back":
+        rgb = np.zeros((h, w, 3), dtype=np.uint8)
+        depth = np.zeros((h, w), dtype=np.uint8)
+        for y in range(h):
+            for x in range(w):
+                for z in range(d):
+                    color = voxel_grid[x, y, z]
+                    if np.any(color):
+                        rgb[y, x] = color
+                        depth[y, x] = int(255 * ((d-1-z) / (d-1)))
+                        break
+    elif view == "left":
+        rgb = np.zeros((h, d, 3), dtype=np.uint8)
+        depth = np.zeros((h, d), dtype=np.uint8)
+        for y in range(h):
+            for z in range(d-1, -1, -1):
+                for x in range(w):
+                    color = voxel_grid[x, y, z]
+                    if np.any(color):
+                        rgb[y, d-1-z] = color
+                        depth[y, d-1-z] = int(255 * (x / (w-1)))
+                        break
+    elif view == "right":
+        rgb = np.zeros((h, d, 3), dtype=np.uint8)
+        depth = np.zeros((h, d), dtype=np.uint8)
+        for y in range(h):
+            for z in range(d):
+                for x in range(w-1, -1, -1):
+                    color = voxel_grid[x, y, z]
+                    if np.any(color):
+                        rgb[y, z] = color
+                        depth[y, z] = int(255 * ((w-1-x) / (w-1)))
+                        break
+    elif view == "top":
+        rgb = np.zeros((w, d, 3), dtype=np.uint8)
+        depth = np.zeros((w, d), dtype=np.uint8)
+        for x in range(w):
+            for z in range(d-1, -1, -1):
+                for y in range(h):
+                    color = voxel_grid[x, y, z]
+                    if np.any(color):
+                        rgb[x, d-1-z] = color
+                        depth[x, d-1-z] = int(255 * (y / (h-1)))
+                        break
+    elif view == "bottom":
+        rgb = np.zeros((w, d, 3), dtype=np.uint8)
+        depth = np.zeros((w, d), dtype=np.uint8)
+        for x in range(w):
+            for z in range(d):
+                for y in range(h-1, -1, -1):
+                    color = voxel_grid[x, y, z]
+                    if np.any(color):
+                        rgb[x, z] = color
+                        depth[x, z] = int(255 * ((h-1-y) / (h-1)))
+                        break
+    else:
+        raise ValueError(f"Unknown view: {view}")
+    return rgb, depth
+
 class MultiViewVoxelFusion:
     @classmethod
     def INPUT_TYPES(cls):
@@ -12,129 +132,214 @@ class MultiViewVoxelFusion:
             "required": {
                 "front_image": ("IMAGE",),
                 "front_depth": ("IMAGE",),
-                "side_image": ("IMAGE",),
-                "side_depth": ("IMAGE",),
-                "top_image": ("IMAGE",),
-                "top_depth": ("IMAGE",),
+                "back_image": ("IMAGE",),
+                "back_depth": ("IMAGE",),
+                "left_image": ("IMAGE",),
+                "left_depth": ("IMAGE",),
+                "right_image": ("IMAGE",),
+                "right_depth": ("IMAGE",),
                 "resolution": ("INT", {"default": 128, "min": 16, "max": 256}),
                 "max_depth": ("INT", {"default": 64, "min": 8, "max": 256}),
                 "surface_mode": (["surface_only", "solid_columns", "thick_surface"], {"default": "solid_columns"}),
                 "invert_depth": ("BOOLEAN", {"default": True}),
                 "export_path": ("STRING", {"default": "fusion_output.vox"}),
-                "preview_voxel": ("BOOLEAN", {"default": False}),
-                "export_glb": ("BOOLEAN", {"default": False}),
-                "glb_cube_size": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 5.0}),
-                "preview_point_size": ("FLOAT", {"default": 4.0, "min": 1.0, "max": 10.0}),
+            },
+            "optional": {
+                "top_image": ("IMAGE",),
+                "top_depth": ("IMAGE",),
+                "bottom_image": ("IMAGE",),
+                "bottom_depth": ("IMAGE",),
+                "front_image_refined": ("IMAGE",),
+                "front_depth_refined": ("IMAGE",),
+                "back_image_refined": ("IMAGE",),
+                "back_depth_refined": ("IMAGE",),
+                "left_image_refined": ("IMAGE",),
+                "left_depth_refined": ("IMAGE",),
+                "right_image_refined": ("IMAGE",),
+                "right_depth_refined": ("IMAGE",),
+                "top_image_refined": ("IMAGE",),
+                "top_depth_refined": ("IMAGE",),
+                "bottom_image_refined": ("IMAGE",),
+                "bottom_depth_refined": ("IMAGE",),
+                "ai_edit_images": ("LIST",),
+                "ai_edit_depths": ("LIST",),
+                "ai_edit_views": ("LIST",),
             }
         }
 
-    RETURN_TYPES = ("NP_ARRAY", "STRING", "STRING")
-    RETURN_NAMES = ("voxels", "vox_path", "glb_path")
+    RETURN_TYPES = ("NP_ARRAY", "STRING")
+    RETURN_NAMES = ("voxels", "vox_path")
     FUNCTION = "run"
     CATEGORY = "VoxelTools"
     OUTPUT_NODE = True
 
     def run(self, front_image, front_depth,
-                  side_image, side_depth,
-                  top_image, top_depth,
+                  back_image, back_depth,
+                  left_image, left_depth,
+                  right_image, right_depth,
                   resolution, max_depth,
                   surface_mode, invert_depth,
-                  export_path, preview_voxel,
-                  export_glb, glb_cube_size, preview_point_size):
+                  export_path,
+                  top_image=None, top_depth=None,
+                  bottom_image=None, bottom_depth=None,
+                  front_image_refined=None, front_depth_refined=None,
+                  back_image_refined=None, back_depth_refined=None,
+                  left_image_refined=None, left_depth_refined=None,
+                  right_image_refined=None, right_depth_refined=None,
+                  top_image_refined=None, top_depth_refined=None,
+                  bottom_image_refined=None, bottom_depth_refined=None,
+                  ai_edit_images=None, ai_edit_depths=None, ai_edit_views=None):
 
-        # Convert each view to its voxel grid
-        front_grid = self.image_depth_to_voxel(front_image, front_depth, resolution, max_depth, surface_mode, invert_depth)
-        side_grid  = self.image_depth_to_voxel(side_image,  side_depth,  resolution, max_depth, surface_mode, invert_depth)
-        top_grid   = self.image_depth_to_voxel(top_image,   top_depth,   resolution, max_depth, surface_mode, invert_depth)
+        def pick(raw, refined):
+            return refined if refined is not None else raw
 
-        # Align all grids into common space
-        # Front: [X,Y,Z] as is
-        # Side: rotate so [Z,Y,X]
-        side_grid_rot = np.transpose(side_grid, (2,1,0,3))
-        # Top: rotate so [X,Z,Y]
-        top_grid_rot = np.transpose(top_grid, (0,2,1,3))
+        # Compose required views
+        view_dict = {
+            "front": (pick(front_image, front_image_refined), pick(front_depth, front_depth_refined)),
+            "back": (pick(back_image, back_image_refined), pick(back_depth, back_depth_refined)),
+            "left": (pick(left_image, left_image_refined), pick(left_depth, left_depth_refined)),
+            "right": (pick(right_image, right_image_refined), pick(right_depth, right_depth_refined)),
+        }
+        # Optionally add top/bottom if present
+        if top_image is not None and top_depth is not None:
+            view_dict["top"] = (pick(top_image, top_image_refined), pick(top_depth, top_depth_refined))
+        if bottom_image is not None and bottom_depth is not None:
+            view_dict["bottom"] = (pick(bottom_image, bottom_image_refined), pick(bottom_depth, bottom_depth_refined))
 
-        # Fuse grids: take union (if any voxel is filled, use color from first non-empty)
-        fused = self.fuse_voxel_grids([front_grid, side_grid_rot, top_grid_rot])
+        # Prepare image/depth for each view
+        prepared_views = {}
+        for key, (img, dmap) in view_dict.items():
+            rgb_tensor = img[0].cpu().numpy()
+            depth_tensor = dmap[0].cpu().numpy()
+            rgb, depth = prepare_images(rgb_tensor, depth_tensor, resolution)
+            prepared_views[key] = (rgb, depth)
 
-        # Save .vox file
+        # Space Carving
+        carved_voxel_grid = self.space_carve_voxels(prepared_views, resolution, max_depth, invert_depth)
+
+        # Assign colors (front view priority, fallback to others)
+        colored_grid = self.assign_colors_to_voxels(carved_voxel_grid, prepared_views, resolution, max_depth)
+
+        # (Optional) Post-fusion AI edit step
+        if ai_edit_images is not None and ai_edit_depths is not None and ai_edit_views is not None:
+            colored_grid = self.apply_ai_edits_to_voxels(
+                colored_grid,
+                ai_edit_images,
+                ai_edit_depths,
+                ai_edit_views,
+                max_depth,
+                surface_mode,
+                invert_depth
+            )
+
         safe_path = self.get_safe_output_path(export_path)
-        self.save_vox_from_grid(fused, safe_path)
+        self.save_vox_from_grid(colored_grid, safe_path)
 
-        # Preview
-        if preview_voxel:
-            self.voxel_preview(fused, preview_point_size)
+        return (colored_grid, safe_path)
 
-        # Export to GLB
-        glb_path = ""
-        if export_glb:
-            glb_path = self.voxel_to_glb(fused, glb_cube_size)
-
-        return (fused, safe_path, glb_path)
-
-    def image_depth_to_voxel(self, image, depth_map, resolution, max_depth, surface_mode, invert_depth):
-        # Convert ComfyUI tensors to numpy
-        rgb_tensor = image[0].cpu().numpy()
-        depth_tensor = depth_map[0].cpu().numpy()
-
-        # Resize images
-        rgb = self.prepare_image(rgb_tensor, resolution)
-        depth = self.prepare_image(depth_tensor, resolution, is_depth=True)
-
-        if invert_depth:
-            depth = 255 - depth
-
-        depth_arr = np.clip((depth / 255.0 * (max_depth - 1)).astype(int), 0, max_depth - 1)
-        h, w = depth.shape
-        voxel_grid = np.zeros((w, h, max_depth, 3), dtype=np.uint8)
-
-        for y in range(h):
-            for x in range(w):
-                d = int(depth_arr[y, x])
-                color = tuple(int(c) for c in rgb[y, x])
-                if surface_mode == "surface_only":
-                    voxel_grid[x, y, d] = color
-                elif surface_mode == "thick_surface":
-                    voxel_grid[x, y, d] = color
-                    if d > 0:
-                        voxel_grid[x, y, d-1] = color
-                elif surface_mode == "solid_columns":
-                    for z in range(d+1):
-                        voxel_grid[x, y, z] = color
-        return voxel_grid
-
-    def prepare_image(self, arr, resolution, is_depth=False):
-        if arr.ndim == 3:
-            if arr.shape[0] in (1,3):
-                arr = arr.transpose(1,2,0)
-            elif arr.shape[2] in (1,3):
-                arr = arr
+    def space_carve_voxels(self, prepared_views, resolution, max_depth, invert_depth):
+        # Start with all voxels empty
+        occupancy = np.zeros((resolution, resolution, max_depth), dtype=bool)
+        for view, (rgb, depth) in prepared_views.items():
+            if invert_depth:
+                depth_processed = 255 - depth
             else:
-                raise ValueError("Unexpected shape")
-        if is_depth:
-            if arr.ndim == 3:
-                arr = arr.mean(axis=2)
-            arr = np.clip(arr, 0, 255).astype(np.uint8)
-        else:
-            if arr.shape[2] == 1:
-                arr = np.repeat(arr, 3, axis=2)
-            arr = np.clip(arr, 0, 255).astype(np.uint8)
-        img = Image.fromarray(arr)
-        img = img.resize((resolution, resolution), Image.BILINEAR)
-        return np.array(img)
+                depth_processed = depth
+            depth_indices = np.clip((depth_processed / 255.0 * (max_depth - 1)).astype(int), 0, max_depth - 1)
+            if view == "front":
+                for y in range(resolution):
+                    for x in range(resolution):
+                        z_limit = depth_indices[y, x]
+                        occupancy[x, y, :z_limit+1] = True
+            elif view == "back":
+                for y in range(resolution):
+                    for x in range(resolution):
+                        z_limit = depth_indices[y, x]
+                        occupancy[x, y, max_depth-z_limit-1:] = True
+            elif view == "left":
+                for y in range(resolution):
+                    for z in range(max_depth):
+                        x_limit = depth_indices[y, z]
+                        occupancy[:x_limit+1, y, z] = True
+            elif view == "right":
+                for y in range(resolution):
+                    for z in range(max_depth):
+                        x_limit = depth_indices[y, z]
+                        occupancy[max_depth-x_limit-1:, y, z] = True
+            elif view == "top":
+                for x in range(resolution):
+                    for z in range(max_depth):
+                        y_limit = depth_indices[x, z]
+                        occupancy[x, :y_limit+1, z] = True
+            elif view == "bottom":
+                for x in range(resolution):
+                    for z in range(max_depth):
+                        y_limit = depth_indices[x, z]
+                        occupancy[x, max_depth-y_limit-1:, z] = True
+        print("[MultiViewVoxelFusion] Occupied voxels:", np.count_nonzero(occupancy))
+        return occupancy
+    
+    def assign_colors_to_voxels(self, occupancy, prepared_views, resolution, max_depth):
+        """
+        Assign colors to occupied voxels. Priority: front, then back, left, right, top, bottom.
+        """
+        color_grid = np.zeros((resolution, resolution, max_depth, 3), dtype=np.uint8)
+        # For each occupied voxel, assign color from nearest view if possible
+        for x in range(resolution):
+            for y in range(resolution):
+                for z in range(max_depth):
+                    if occupancy[x, y, z]:
+                        assigned = False
+                        # Try front
+                        if "front" in prepared_views:
+                            rgb, depth = prepared_views["front"]
+                            if y < rgb.shape[0] and x < rgb.shape[1]:
+                                color_grid[x, y, z] = rgb[y, x]
+                                assigned = True
+                        # Try others if front not assigned
+                        if not assigned and "back" in prepared_views:
+                            rgb, depth = prepared_views["back"]
+                            if y < rgb.shape[0] and x < rgb.shape[1]:
+                                color_grid[x, y, z] = rgb[y, x]
+                                assigned = True
+                        if not assigned and "left" in prepared_views:
+                            rgb, depth = prepared_views["left"]
+                            if y < rgb.shape[0] and z < rgb.shape[1]:
+                                color_grid[x, y, z] = rgb[y, z]
+                                assigned = True
+                        if not assigned and "right" in prepared_views:
+                            rgb, depth = prepared_views["right"]
+                            if y < rgb.shape[0] and z < rgb.shape[1]:
+                                color_grid[x, y, z] = rgb[y, z]
+                                assigned = True
+                        if not assigned and "top" in prepared_views:
+                            rgb, depth = prepared_views["top"]
+                            if x < rgb.shape[0] and z < rgb.shape[1]:
+                                color_grid[x, y, z] = rgb[x, z]
+                                assigned = True
+                        if not assigned and "bottom" in prepared_views:
+                            rgb, depth = prepared_views["bottom"]
+                            if x < rgb.shape[0] and z < rgb.shape[1]:
+                                color_grid[x, y, z] = rgb[x, z]
+                                assigned = True
+        return color_grid
 
-    def fuse_voxel_grids(self, grids):
-        shape = grids[0].shape
-        fused = np.zeros(shape, dtype=np.uint8)
-        for x in range(shape[0]):
-            for y in range(shape[1]):
-                for z in range(shape[2]):
-                    for grid in grids:
-                        color = grid[x,y,z]
-                        if np.any(color):
-                            fused[x,y,z] = color
-                            break
-        return fused
+    def apply_ai_edits_to_voxels(self, voxel_grid, ai_images, ai_depths, ai_views, max_depth, surface_mode, invert_depth):
+        view_to_rot = {
+            "front": lambda v: v,
+            "back": lambda v: np.flip(v, axis=0),
+            "left": lambda v: np.transpose(v, (2, 1, 0, 3)),
+            "right": lambda v: np.flip(np.transpose(v, (2, 1, 0, 3)), axis=0),
+            "top": lambda v: np.transpose(v, (0, 2, 1, 3)),
+            "bottom": lambda v: np.flip(np.transpose(v, (0, 2, 1, 3)), axis=2),
+        }
+        for img, dmap, view in zip(ai_images, ai_depths, ai_views):
+            rgb, depth = np.array(img), np.array(dmap)
+            vgrid = self.image_depth_to_voxel(rgb, depth, max_depth, surface_mode, invert_depth)
+            vgrid = view_to_rot[view](vgrid)
+            mask = np.any(vgrid > 0, axis=-1)
+            voxel_grid[mask] = vgrid[mask]
+        return voxel_grid
 
     def get_safe_output_path(self, export_path):
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -157,7 +362,7 @@ class MultiViewVoxelFusion:
         for x in range(w):
             for y in range(h):
                 for z in range(d):
-                    color = tuple(int(c) for c in voxel_grid[x,y,z])
+                    color = tuple(int(c) for c in voxel_grid[x, y, z])
                     if np.any(color):
                         voxels.append((x, y, z))
                         colors.append(color)
@@ -174,7 +379,7 @@ class MultiViewVoxelFusion:
         else:
             palette = unique_colors
         while len(palette) < 256:
-            palette.append((0,0,0))
+            palette.append((0, 0, 0))
         return [tuple(int(c) for c in col) for col in palette[:256]]
 
     def get_color_index(self, color, palette):
@@ -201,17 +406,21 @@ class MultiViewVoxelFusion:
                 f.write(struct.pack('<I', 0))
                 f.write(struct.pack('<III', int(size_x), int(size_y), int(size_z)))
                 f.write(b'XYZI')
-                xyzi_content_size = 4 + len(voxels)*4
+                xyzi_content_size = 4 + len(voxels) * 4
                 f.write(struct.pack('<I', xyzi_content_size))
                 f.write(struct.pack('<I', 0))
                 f.write(struct.pack('<I', len(voxels)))
                 for i, (x, y, z) in enumerate(voxels):
                     color_index = self.get_color_index(colors[i], palette)
+                    x = max(0, min(int(x), size_x - 1))
+                    y = max(0, min(int(y), size_y - 1))
+                    z = max(0, min(int(z), size_z - 1))
+                    color_index = max(1, min(255, int(color_index)))
                     f.write(struct.pack('<BBBB', x, y, z, color_index))
                 f.write(b'RGBA')
                 f.write(struct.pack('<I', 1024))
                 f.write(struct.pack('<I', 0))
-                for r,g,b in palette:
+                for r, g, b in palette:
                     f.write(struct.pack('<BBBB', int(r), int(g), int(b), 255))
                 end_pos = f.tell()
                 children_size = end_pos - main_start
@@ -221,58 +430,3 @@ class MultiViewVoxelFusion:
             print(f"[MultiViewVoxelFusion] Saved {len(voxels)} voxels to {export_path}")
         except Exception as e:
             print(f"[MultiViewVoxelFusion] Error saving file: {e}")
-
-    def voxel_preview(self, voxels, point_size=4.0):
-        try:
-            import open3d as o3d
-            voxels = np.array(voxels)
-            points = []
-            colors = []
-            sx, sy, sz, _ = voxels.shape
-            for x in range(sx):
-                for y in range(sy):
-                    for z in range(sz):
-                        color = voxels[x, y, z]
-                        if np.any(color):
-                            points.append([x, y, z])
-                            colors.append(color / 255.0)
-            if not points:
-                print("⚠️ No voxels to preview.")
-                return
-            pc = o3d.geometry.PointCloud()
-            pc.points = o3d.utility.Vector3dVector(np.array(points))
-            pc.colors = o3d.utility.Vector3dVector(np.array(colors))
-            o3d.visualization.draw_geometries([
-                pc
-            ], window_name="Multi-View Voxel Preview", width=800, height=600, point_show_normal=False)
-        except Exception as e:
-            print(f"❌ VoxelPreview failed: {e}")
-
-    def voxel_to_glb(self, voxels, cube_size=1.0):
-        try:
-            import trimesh
-            import tempfile
-            voxels = np.array(voxels)
-            mesh = trimesh.Scene()
-            vx, vy, vz, _ = voxels.shape
-            for x in range(vx):
-                for y in range(vy):
-                    for z in range(vz):
-                        color = voxels[x, y, z]
-                        if not np.any(color):
-                            continue
-                        cube = trimesh.creation.box(extents=(cube_size, cube_size, cube_size))
-                        cube.apply_translation((x * cube_size, y * cube_size, z * cube_size))
-                        cube.visual.face_colors = np.tile(np.append(color, 255), (cube.faces.shape[0], 1))
-                        mesh.add_geometry(cube)
-            if not mesh.geometry:
-                raise RuntimeError("No voxel cubes were added to the scene!")
-            combined = mesh.dump(concatenate=True)
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".glb") as tmp:
-                combined.export(tmp.name, file_type="glb")
-                glb_path = tmp.name
-            print(f"[MultiViewVoxelFusion] GLB exported to {glb_path}")
-            return glb_path
-        except Exception as e:
-            print(f"❌ VoxelToGLB failed: {e}")
-            return ""

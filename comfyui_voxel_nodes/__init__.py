@@ -3,8 +3,12 @@ from .depth_to_vox import DepthToVox
 from .voxel_preview import VoxelPreview
 from .voxel_to_glb import VoxelToGLB
 from .multi_view_voxel_fusion import MultiViewVoxelFusion
-from .wfc_terrain_generator import WFCTerrain3DNode
-from .wfc3d import WFC3D
+from .wfc3d import WFCTerrain3DNode
+from .voxel_nodes import VoxelModelLoader
+from .voxel_nodes import DepthEstimationNode
+from .voxel_nodes import OptimizedVoxelizationNode
+from .voxel_nodes import ShapeCompletionNode
+from .voxel_nodes import VoxelPreviewNode
 
 NODE_CLASS_MAPPINGS = {
     "AutoVoxelScaler": AutoVoxelScaler,
@@ -12,8 +16,12 @@ NODE_CLASS_MAPPINGS = {
     "VoxelPreview": VoxelPreview,
     "VoxelToGLB": VoxelToGLB,
     "MultiViewVoxelFusion": MultiViewVoxelFusion,
-    "WFCTerrain3DNode": WFCTerrain3DNode,
-    "WFC3D": WFC3D,
+    "ProceduralChunkedWFC3DTerrain": WFCTerrain3DNode,
+    "VoxelModelLoader": VoxelModelLoader,
+    "DepthEstimationNode": DepthEstimationNode,
+    "OptimizedVoxelizationNode": OptimizedVoxelizationNode,
+    "ShapeCompletionNode": ShapeCompletionNode,
+    "VoxelPreviewNode": VoxelPreviewNode,    
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -22,6 +30,10 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "VoxelPreview": "Voxel Preview",
     "VoxelToGLB": "Voxel to .GLB",
     "MultiViewVoxelFusion": "Multi View Voxel Fusion",
-    "WFCTerrain3DNode": "WFC Terrain 3D Node",
-    "WFC3D": "WFC3D Engine",
+    "ProceduralChunkedWFC3DTerrain": "Procedural Chunked WFC3D Terrain",
+    "VoxelModelLoader": "Load Voxel Model",
+    "DepthEstimationNode": "Depth Estimation",
+    "OptimizedVoxelizationNode": "Voxelization (Optimized)",
+    "ShapeCompletionNode": "3D Shape Completion",
+    "VoxelPreviewNode": "Voxel Preview",
 }
