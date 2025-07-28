@@ -4,13 +4,15 @@ from .voxel_preview import VoxelPreview
 from .voxel_to_glb import VoxelToGLB
 from .multi_view_voxel_fusion import MultiViewVoxelFusion
 from .wfc3d import WFCTerrain3DNode
-from .voxel_nodes import VoxelModelLoader
-from .voxel_nodes import DepthEstimationNode
-from .voxel_nodes import OptimizedVoxelizationNode
-from .voxel_nodes import ShapeCompletionNode
-from .voxel_nodes import VoxelPreviewNode
-import os
-import importlib
+from .wfc_terrain_generator import WFC3DTerrainGeneratorNode
+from .voxel_nodes import (
+    VoxelModelLoader,
+    DepthEstimationNode,
+    OptimizedVoxelizationNode,
+    ShapeCompletionNode,
+    VoxelPreviewNode,
+)
+
 import time
 
 MODULE_NAME = "comfyui_voxel_nodes"
@@ -33,28 +35,13 @@ ascii_art = r"""
 ⠀⠀⠀⠀⠀⠀⠀⠘⠛⠛⠛⠛⠛⠛⠛⠛⠛⠛⠛⠛⠛⠛⠛⠛⠃⠀⠀⠀⠀⠀
 """
 
-print(f"\033[95m{ascii_art}\033[0m")  # Purple color
-
+print(f"\033[95m{ascii_art}\033[0m")
 print(f"[{MODULE_NAME}] 🔧 Initializing...")
-
 start_time = time.time()
-module_path = os.path.dirname(__file__)
 
-for fname in os.listdir(module_path):
-    if fname.endswith(".py") and fname != "__init__.py":
-        mod_name = fname[:-3]
-        try:
-            importlib.import_module(f"{MODULE_NAME}.{mod_name}")
-            print(f"[{MODULE_NAME}] ✅ Loaded module: {mod_name}")
-        except Exception as e:
-            print(f"[{MODULE_NAME}] ❌ Failed to load {mod_name}: {e}")
-
+print(f"[{MODULE_NAME}] ✅ All modules imported.")
 elapsed = time.time() - start_time
 print(f"[{MODULE_NAME}] 🚀 Ready in {elapsed:.2f}s")
-
-
-
-
 
 NODE_CLASS_MAPPINGS = {
     "AutoVoxelScaler": AutoVoxelScaler,
@@ -67,7 +54,8 @@ NODE_CLASS_MAPPINGS = {
     "DepthEstimationNode": DepthEstimationNode,
     "OptimizedVoxelizationNode": OptimizedVoxelizationNode,
     "ShapeCompletionNode": ShapeCompletionNode,
-    "VoxelPreviewNode": VoxelPreviewNode,    
+    "VoxelPreviewNode": VoxelPreviewNode,
+    "WFC3DTerrainGenerator": WFC3DTerrainGeneratorNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -82,4 +70,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "OptimizedVoxelizationNode": "Voxelization (Optimized)",
     "ShapeCompletionNode": "3D Shape Completion",
     "VoxelPreviewNode": "Voxel Preview",
+    "WFC3DTerrainGenerator": "WFC 3D Terrain Generator",
 }

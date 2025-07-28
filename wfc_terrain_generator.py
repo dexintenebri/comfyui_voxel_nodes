@@ -4,7 +4,7 @@ import os
 import datetime
 import threading
 
-from .wfc3d import WFC3D
+from .wfc3d import WFCTerrain3DNode
 
 from midvoxio.voxio import write_list_to_vox
 
@@ -158,7 +158,7 @@ def generate_chunk_threaded(ref_grid, shape, tile_size, seed, edge_constraints, 
         terrain_chunks[idx] = None
         edge_list[idx] = None
 
-class WFCTerrain3DNode:
+class WFC3DTerrainGeneratorNode:
     @classmethod
     def INPUT_TYPES(cls):
         return {
