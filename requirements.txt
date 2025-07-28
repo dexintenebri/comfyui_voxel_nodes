@@ -2,3 +2,7 @@ numpy
 Pillow
 midvoxio
 trimesh
+scikit-image
+scikit-learn
+perlin-noise
+scipy
