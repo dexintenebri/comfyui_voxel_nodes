@@ -1,8 +1,16 @@
-numpy
-Pillow
-midvoxio
-trimesh
-scikit-image
-scikit-learn
-perlin-noise
-scipy
+# Core libraries (pinned for stability)
+numpy==1.26.4
+Pillow==11.3.0
+midvoxio==0.1.6
+trimesh==4.7.1
+scikit-image==0.25.2
+scikit-learn==1.7.1
+perlin-noise==1.14
+scipy==1.15.0
+networkx==3.4.2
+imageio==2.37.0
+tifffile==2025.5.10
+joblib==1.5.1
+threadpoolctl==3.6.0
+packaging==24.2
+lazy-loader==0.4
