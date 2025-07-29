@@ -1,0 +1,35 @@
+NETWORK:
+  TCONV_USE_BIAS: true
+  LEAKY_VALUE: 0.1
+
+ENCODER:
+  USE_BN: true
+  LEAKYRELU: true
+
+DECODER:
+  USE_BN: true
+  LEAKYRELU: true
+
+MERGER:
+  USE_BN: true
+  LEAKYRELU: true
+
+REFINER:
+  USE_BN: true
+  LEAKYRELU: true
+
+TRAIN:
+  LR: 0.001
+  BETAS: [0.9, 0.999]
+  EPS: 1e-08
+  WEIGHT_DECAY: 0.0
+  BATCH_SIZE: 16
+
+LOSS:
+  VOXEL: "BCE"
+  LAMBDA: 1.0
+
+DATASET:
+  N_VIEWS_RENDERING: 24
+  IMG_H: 224
+  IMG_W: 224

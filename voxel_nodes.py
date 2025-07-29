@@ -9,6 +9,7 @@ import sys
 import time
 import trimesh
 from torchvision import transforms
+import yaml
 from types import SimpleNamespace
 
 # Add Pix2Vox++ to path
@@ -16,14 +17,133 @@ pix2vox_path = os.path.join(os.path.dirname(__file__), "pix2vox")
 sys.path.append(pix2vox_path)
 
 # Import Pix2Vox++ model
-from comfyui_voxel_nodes.pix2vox.model.decoder import Decoder
-from comfyui_voxel_nodes.pix2vox.model.encoder import Encoder
-from comfyui_voxel_nodes.pix2vox.model.refiner import Refiner
-from comfyui_voxel_nodes.pix2vox.model.merger import Merger
+from .pix2vox.model.decoder import Decoder
+from .pix2vox.model.encoder import Encoder
+from .pix2vox.model.refiner import Refiner
+from .pix2vox.model.merger import Merger
 
 # Constants for memory optimization
 MAX_RESOLUTION = 128  # Safe limit for VRAM
 SPARSE_THRESHOLD = 0.05  # Skip voxels with low depth
+
+import folder_paths
+
+def add_voxel_models_path():
+    """
+    Ensure voxel_models directory is registered in folder_paths.
+    Works for all users cloning the repo without modifying global folder_paths.py.
+    """
+    # ComfyUI's standard models dir
+    models_dir = os.path.join(os.path.dirname(folder_paths.__file__), "..", "models")
+    voxel_models_path = os.path.normpath(os.path.join(models_dir, "voxel_models"))
+
+    if not os.path.exists(voxel_models_path):
+        os.makedirs(voxel_models_path, exist_ok=True)  # auto-create if missing
+
+    # Register voxel_models as a folder type
+    if "voxel_models" in folder_paths.folder_names_and_paths:
+        if voxel_models_path not in folder_paths.folder_names_and_paths["voxel_models"][0]:
+            folder_paths.folder_names_and_paths["voxel_models"][0].insert(0, voxel_models_path)
+    else:
+        folder_paths.folder_names_and_paths["voxel_models"] = ([voxel_models_path], {".pth", ".safetensors"})
+
+# Call it immediately
+add_voxel_models_path()
+
+
+def dict_to_namespace(d):
+    ns = SimpleNamespace()
+    for k, v in d.items():
+        setattr(ns, k, dict_to_namespace(v) if isinstance(v, dict) else v)
+    return ns
+
+def remove_module_prefix(state_dict):
+    """Remove 'module.' prefix from state dict keys if present."""
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        if k.startswith("module."):
+            new_key = k[len("module."):]
+        else:
+            new_key = k
+        new_state_dict[new_key] = v
+    return new_state_dict
+
+def load_pix2vox_weights(model_dir, model_type, encoder, decoder, refiner, merger):
+    """
+    Load weights for Pix2Vox++ models from model_dir.
+    Handles:
+    - multiple separate .pth files (encoder.pth, decoder.pth, ...)
+    - single combined .pth file with submodules in dict
+    - single flat .pth file for encoder only (fallback)
+    """
+    # Map model_type → filename(s)
+    model_name_map = {
+        "pix2vox++": "pix2vox++-shapenet.pth",
+        "shapenet": "pix2vox++-shapenet.pth",
+        "custom": "custom.pth"
+    }
+
+    # Check if separate weight files exist
+    expected_files = {
+        "encoder": os.path.join(model_dir, "encoder.pth"),
+        "decoder": os.path.join(model_dir, "decoder.pth"),
+        "refiner": os.path.join(model_dir, "refiner.pth"),
+        "merger": os.path.join(model_dir, "merger.pth")
+    }
+    all_separate_exist = all(os.path.exists(f) for f in expected_files.values())
+
+    if all_separate_exist:
+        print("Loading separate weight files from model_dir...")
+        encoder.load_state_dict(torch.load(expected_files["encoder"], map_location="cpu"))
+        decoder.load_state_dict(torch.load(expected_files["decoder"], map_location="cpu"))
+        refiner.load_state_dict(torch.load(expected_files["refiner"], map_location="cpu"))
+        merger.load_state_dict(torch.load(expected_files["merger"], map_location="cpu"))
+        return True
+
+    # Else try single combined file
+    filename = model_name_map.get(model_type, f"{model_type}.pth")
+    combined_path = os.path.join(model_dir, filename)
+    if not os.path.exists(combined_path):
+        print(f"⚠ No model weights found at {combined_path}")
+        return False
+
+    print(f"Loading combined weights from {combined_path} ...")
+    checkpoint = torch.load(combined_path, map_location="cpu")
+
+    # If checkpoint has nested dicts with keys like "encoder_state_dict", remove prefixes inside them
+    if all(key in checkpoint for key in ["encoder_state_dict", "decoder_state_dict", "refiner_state_dict", "merger_state_dict"]):
+        encoder_state = remove_module_prefix(checkpoint["encoder_state_dict"])
+        decoder_state = remove_module_prefix(checkpoint["decoder_state_dict"])
+        refiner_state = remove_module_prefix(checkpoint["refiner_state_dict"])
+        merger_state = remove_module_prefix(checkpoint["merger_state_dict"])
+
+        encoder.load_state_dict(encoder_state)
+        decoder.load_state_dict(decoder_state)
+        refiner.load_state_dict(refiner_state)
+        merger.load_state_dict(merger_state)
+        return True
+
+    # If checkpoint has top-level keys like "encoder", "decoder"
+    keys = list(checkpoint.keys())
+    if all(key in keys for key in ["encoder", "decoder", "refiner", "merger"]):
+        encoder_state = remove_module_prefix(checkpoint["encoder"])
+        decoder_state = remove_module_prefix(checkpoint["decoder"])
+        refiner_state = remove_module_prefix(checkpoint["refiner"])
+        merger_state = remove_module_prefix(checkpoint["merger"])
+
+        encoder.load_state_dict(encoder_state)
+        decoder.load_state_dict(decoder_state)
+        refiner.load_state_dict(refiner_state)
+        merger.load_state_dict(merger_state)
+        return True
+
+    # Else fallback - flat encoder only checkpoint
+    print("Detected flat checkpoint (likely encoder only). Stripping module prefix if needed.")
+    checkpoint = remove_module_prefix(checkpoint)
+    encoder.load_state_dict(checkpoint)
+    print("⚠ Only encoder weights loaded. Decoder, refiner, and merger remain uninitialized.")
+    return True
+
 
 class VoxelModelLoader:
     @classmethod
@@ -33,25 +153,60 @@ class VoxelModelLoader:
                 "model_type": (["pix2vox++", "shapenet", "custom"], {"default": "pix2vox++"}),
             }
         }
-    
+
     RETURN_TYPES = ("VOXEL_MODEL",)
     FUNCTION = "load_model"
     CATEGORY = "VoxelNodes"
-    
+
     def load_model(self, model_type):
-        model_path = folder_paths.get_full_path("voxel_models", 
-                                              f"{model_type}.pth" if model_type != "custom" else "custom.pth")
-        
-        # Load model configuration
-        config = {
+        # Load YAML config for model architecture
+        config_path = os.path.join(os.path.dirname(__file__), "pix2vox", "configs", "pix2vox.yml")
+        with open(config_path, "r") as f:
+            cfg_dict = yaml.safe_load(f)
+        cfg = dict_to_namespace(cfg_dict)
+
+        print(f"Loaded config keys: {list(cfg.__dict__.keys())}")
+
+        # Initialize model components
+        encoder = Encoder(cfg)
+        decoder = Decoder(cfg)
+        refiner = Refiner(cfg)
+        merger = Merger(cfg)
+
+        # --- look inside repo-local path first ---
+        local_model_dir = os.path.join(os.path.dirname(__file__), "pix2vox", "model")
+
+        loaded = load_pix2vox_weights(local_model_dir, model_type, encoder, decoder, refiner, merger)
+
+        if not loaded:
+            # fallback to global ComfyUI models dir
+            global_model_dir = folder_paths.get_full_path("voxel_models", "")
+            loaded = load_pix2vox_weights(global_model_dir, model_type, encoder, decoder, refiner, merger)
+
+        if not loaded:
+            print(f"⚠ Failed to load any model weights for {model_type}")
+
+        # small config dict for runtime params
+        model_config = {
             "encoder_dim": 256,
             "decoder_dim": 256,
             "refiner_dim": 512,
             "threshold": 0.4,
             "in_channels": 3
         }
-        
-        return ({"config": config, "type": model_type, "path": model_path},)
+
+        voxel_model = {
+            "type": model_type,
+            "encoder": encoder,
+            "decoder": decoder,
+            "refiner": refiner,
+            "merger": merger,
+            "config": cfg,
+            "model_config": model_config
+        }
+
+        return (voxel_model,)
+
 
 class DepthEstimationNode:
     @classmethod
@@ -296,7 +451,7 @@ class ShapeCompletionNode:
         return self.models[model_key]
     
     def complete_shape(self, voxel_data, voxel_model, completion_strength):
-        model_info = self.load_model(voxel_model)
+        model_info = self.load_model("pix2vox++")
         device = model_info["device"]
         
         # Prepare input image
