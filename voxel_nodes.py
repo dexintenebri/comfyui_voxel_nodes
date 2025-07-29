@@ -94,10 +94,10 @@ def load_pix2vox_weights(model_dir, model_type, encoder, decoder, refiner, merge
 
     if all_separate_exist:
         print("Loading separate weight files from model_dir...")
-        encoder.load_state_dict(torch.load(expected_files["encoder"], map_location="cpu"))
-        decoder.load_state_dict(torch.load(expected_files["decoder"], map_location="cpu"))
-        refiner.load_state_dict(torch.load(expected_files["refiner"], map_location="cpu"))
-        merger.load_state_dict(torch.load(expected_files["merger"], map_location="cpu"))
+        encoder.load_state_dict(torch.load(expected_files["encoder"], map_location="cpu"), strict=False)
+        decoder.load_state_dict(torch.load(expected_files["decoder"], map_location="cpu"), strict=False)
+        refiner.load_state_dict(torch.load(expected_files["refiner"], map_location="cpu"), strict=False)
+        merger.load_state_dict(torch.load(expected_files["merger"], map_location="cpu"), strict=False)
         return True
 
     # Else try single combined file
@@ -110,17 +110,17 @@ def load_pix2vox_weights(model_dir, model_type, encoder, decoder, refiner, merge
     print(f"Loading combined weights from {combined_path} ...")
     checkpoint = torch.load(combined_path, map_location="cpu")
 
-    # If checkpoint has nested dicts with keys like "encoder_state_dict", remove prefixes inside them
+    # If checkpoint has nested dicts with keys like "encoder_state_dict"
     if all(key in checkpoint for key in ["encoder_state_dict", "decoder_state_dict", "refiner_state_dict", "merger_state_dict"]):
         encoder_state = remove_module_prefix(checkpoint["encoder_state_dict"])
         decoder_state = remove_module_prefix(checkpoint["decoder_state_dict"])
         refiner_state = remove_module_prefix(checkpoint["refiner_state_dict"])
         merger_state = remove_module_prefix(checkpoint["merger_state_dict"])
 
-        encoder.load_state_dict(encoder_state)
-        decoder.load_state_dict(decoder_state)
-        refiner.load_state_dict(refiner_state)
-        merger.load_state_dict(merger_state)
+        encoder.load_state_dict(encoder_state, strict=False)
+        decoder.load_state_dict(decoder_state, strict=False)
+        refiner.load_state_dict(refiner_state, strict=False)
+        merger.load_state_dict(merger_state, strict=False)
         return True
 
     # If checkpoint has top-level keys like "encoder", "decoder"
@@ -131,16 +131,16 @@ def load_pix2vox_weights(model_dir, model_type, encoder, decoder, refiner, merge
         refiner_state = remove_module_prefix(checkpoint["refiner"])
         merger_state = remove_module_prefix(checkpoint["merger"])
 
-        encoder.load_state_dict(encoder_state)
-        decoder.load_state_dict(decoder_state)
-        refiner.load_state_dict(refiner_state)
-        merger.load_state_dict(merger_state)
+        encoder.load_state_dict(encoder_state, strict=False)
+        decoder.load_state_dict(decoder_state, strict=False)
+        refiner.load_state_dict(refiner_state, strict=False)
+        merger.load_state_dict(merger_state, strict=False)
         return True
 
     # Else fallback - flat encoder only checkpoint
     print("Detected flat checkpoint (likely encoder only). Stripping module prefix if needed.")
     checkpoint = remove_module_prefix(checkpoint)
-    encoder.load_state_dict(checkpoint)
+    encoder.load_state_dict(checkpoint, strict=False)
     print("⚠ Only encoder weights loaded. Decoder, refiner, and merger remain uninitialized.")
     return True
 
