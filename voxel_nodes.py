@@ -4,11 +4,12 @@ import comfy.utils
 import folder_paths
 from PIL import Image
 import json
-import scipy.sparse
 import os
 import sys
 import time
+import trimesh
 from torchvision import transforms
+from types import SimpleNamespace
 
 # Add Pix2Vox++ to path
 pix2vox_path = os.path.join(os.path.dirname(__file__), "pix2vox")
@@ -46,7 +47,8 @@ class VoxelModelLoader:
             "encoder_dim": 256,
             "decoder_dim": 256,
             "refiner_dim": 512,
-            "threshold": 0.4
+            "threshold": 0.4,
+            "in_channels": 3
         }
         
         return ({"config": config, "type": model_type, "path": model_path},)
@@ -73,17 +75,38 @@ class DepthEstimationNode:
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ])
 
-    def load_model(self, model_size):
-        if model_size not in self.models:
+    def load_midas_model(self, model_size):
+        """Load MiDaS model with conflict resolution"""
+        # Backup original sys.path
+        original_sys_path = sys.path.copy()
+        
+        # Filter out problematic paths
+        filtered_paths = [p for p in sys.path if "comfyui_controlnet_aux" not in p]
+        sys.path = filtered_paths
+        
+        try:
             model = torch.hub.load("intel-isl/MiDaS", f"MiDaS_{model_size}")
-            model.eval()
-            if torch.cuda.is_available():
-                model = model.cuda()
-            self.models[model_size] = model
-        return self.models[model_size]
+        finally:
+            # Restore original sys.path
+            sys.path = original_sys_path
+            
+        return model
 
     def estimate_depth(self, image, model_size):
-        model = self.load_model(model_size)
+        if model_size not in self.models:
+            try:
+                model = self.load_midas_model(model_size)
+            except Exception as e:
+                print(f"Error loading MiDaS model: {e}")
+                print("Falling back to simple depth estimation")
+                model = None
+                
+            if model:
+                model.eval()
+                if torch.cuda.is_available():
+                    model = model.cuda()
+                self.models[model_size] = model
+        
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # Process first image in batch
@@ -93,20 +116,28 @@ class DepthEstimationNode:
         img = img / 255.0
         img = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])(img)
 
-        with torch.no_grad():
-            img = img.to(device)
-            prediction = model(img)
+        # If model failed to load, use simple grayscale conversion
+        if model_size not in self.models or self.models[model_size] is None:
+            depth_map = img.mean(dim=1, keepdim=True)  # Simple grayscale
+        else:
+            with torch.no_grad():
+                img = img.to(device)
+                prediction = self.models[model_size](img)
 
-        # Normalize depth map
-        depth_min = prediction.min()
-        depth_max = prediction.max()
-        depth_map = (prediction - depth_min) / (depth_max - depth_min)
+            # Normalize depth map
+            depth_min = prediction.min()
+            depth_max = prediction.max()
+            depth_map = (prediction - depth_min) / (depth_max - depth_min)
+        
+        # Process depth map
         depth_map = depth_map.squeeze().cpu().numpy()
+        
+        # Convert to uint8 image
         depth_map = (depth_map * 255).astype(np.uint8)
         depth_map = Image.fromarray(depth_map)
         depth_map = depth_map.resize((image.shape[2], image.shape[1]))
         
-        # Convert to tensor
+        # Convert to tensor (H, W, 1)
         depth_map = torch.from_numpy(np.array(depth_map)).float() / 255.0
         depth_map = depth_map.unsqueeze(0).unsqueeze(-1)
         
@@ -133,16 +164,37 @@ class OptimizedVoxelizationNode:
         voxel_resolution = min(voxel_resolution, MAX_RESOLUTION)
         
         img_data = image[0].numpy()  # (H, W, 3)
-        depth_data = depth_map[0].numpy().squeeze() * depth_scale  # (H, W)
         
+        # Handle depth map shape - ensure it's 2D
+        depth_data = depth_map[0].numpy()
+        
+        # Remove any extra dimensions
+        while depth_data.ndim > 2 and depth_data.shape[-1] == 1:
+            depth_data = depth_data[..., 0]
+            
+        # If it's still not 2D, try to convert to grayscale
+        if depth_data.ndim != 2:
+            # If it has 3 channels, convert to grayscale
+            if depth_data.ndim == 3 and depth_data.shape[-1] == 3:
+                depth_data = depth_data.mean(axis=-1)
+            else:
+                # For other cases, take the first channel
+                depth_data = depth_data[..., 0]
+        
+        # Now ensure it's 2D
+        depth_data = depth_data.squeeze()
+        depth_data = depth_data * depth_scale
+        
+        # Get height and width
         H, W = depth_data.shape
+        
         min_depth = depth_data.min()
         max_depth = depth_data.max()
         depth_range = max_depth - min_depth if max_depth > min_depth else 1.0
         
-        # Create sparse matrices
-        voxel_grid = scipy.sparse.dok_matrix((voxel_resolution, voxel_resolution, voxel_resolution), dtype=np.float32)
-        color_dict = {}  # Store colors in dict for efficiency
+        # Use dictionary-based storage
+        voxels_set = set()
+        color_dict = {}
         
         # Vectorized processing
         y_coords, x_coords = np.indices((H, W))
@@ -163,11 +215,12 @@ class OptimizedVoxelizationNode:
         
         # Store voxels and colors
         for i in range(len(vx)):
-            voxel_grid[vy[i], vx[i], vz[i]] = 1.0
-            color_dict[(vy[i], vx[i], vz[i])] = colors[i]
+            coord = (vy[i], vx[i], vz[i])
+            voxels_set.add(coord)
+            color_dict[coord] = colors[i]
         
         voxel_data = {
-            "voxels": voxel_grid,
+            "voxels": voxels_set,
             "colors": color_dict,
             "resolution": voxel_resolution,
             "depth_map": depth_data,
@@ -198,19 +251,22 @@ class ShapeCompletionNode:
         if model_key not in self.models:
             config = model_info["config"]
             
-            # Initialize model
-            encoder = Encoder(
-                dim=config["encoder_dim"],
-                in_channels=3
-            )
-            decoder = Decoder(
-                dim=config["decoder_dim"],
-                out_channels=1
-            )
-            refiner = Refiner(
-                dim=config["refiner_dim"],
-                out_channels=1
-            )
+            # Create configuration namespace expected by Pix2Vox
+            cfg = SimpleNamespace()
+            cfg.ENCODER = SimpleNamespace()
+            cfg.ENCODER.DIM = config["encoder_dim"]
+            cfg.ENCODER.IN_CHANNELS = config["in_channels"]  # Fix for input channels
+            
+            cfg.DECODER = SimpleNamespace()
+            cfg.DECODER.DIM = config["decoder_dim"]
+            
+            cfg.REFINER = SimpleNamespace()
+            cfg.REFINER.DIM = config["refiner_dim"]
+            
+            # Initialize model with configuration
+            encoder = Encoder(cfg)  # Removed in_channels parameter
+            decoder = Decoder(cfg)
+            refiner = Refiner(cfg)
             merger = Merger()
             
             # Load weights
@@ -273,17 +329,16 @@ class ShapeCompletionNode:
         completed_voxels = completed_voxels.squeeze().cpu().numpy()
         resolution = completed_voxels.shape[0]
         
-        # Create sparse representation
-        completed_sparse = scipy.sparse.dok_matrix(completed_voxels.shape, dtype=bool)
+        # Create new voxel set
+        completed_set = set()
         completed_colors = {}
         
         # Find coordinates of completed voxels
         vy, vx, vz = np.where(completed_voxels)
-        
-        # Create color dictionary
         for y, x, z in zip(vy, vx, vz):
-            completed_sparse[y, x, z] = True
-            completed_colors[(y, x, z)] = [0.8, 0.8, 1.0]  # Default bluish color for predicted voxels
+            coord = (y, x, z)
+            completed_set.add(coord)
+            completed_colors[coord] = [0.8, 0.8, 1.0]  # Default bluish color
         
         # Blend with original partial voxels
         orig_res = voxel_data["resolution"]
@@ -292,19 +347,22 @@ class ShapeCompletionNode:
         orig_colors = voxel_data["colors"]
         
         # Process original voxels
-        for (y, x, z), _ in orig_voxels.items():
+        for coord in orig_voxels:
+            y, x, z = coord
             ny, nx, nz = int(y * scale_factor), int(x * scale_factor), int(z * scale_factor)
-            if 0 <= ny < resolution and 0 <= nx < resolution and 0 <= nz < resolution:
+            new_coord = (ny, nx, nz)
+            
+            if (0 <= ny < resolution and 0 <= nx < resolution and 0 <= nz < resolution):
                 # Skip if already filled by AI and random check passes
-                if (ny, nx, nz) in completed_colors and np.random.random() < completion_strength:
+                if new_coord in completed_set and np.random.random() < completion_strength:
                     continue
                 
-                completed_sparse[ny, nx, nz] = True
-                if (y, x, z) in orig_colors:
-                    completed_colors[(ny, nx, nz)] = orig_colors[(y, x, z)]
+                completed_set.add(new_coord)
+                if coord in orig_colors:
+                    completed_colors[new_coord] = orig_colors[coord]
         
         # Update voxel data
-        voxel_data["voxels"] = completed_sparse
+        voxel_data["voxels"] = completed_set
         voxel_data["colors"] = completed_colors
         voxel_data["resolution"] = resolution
         
@@ -334,10 +392,11 @@ class VoxelPreviewNode:
         voxel_coords = []
         voxel_colors = []
         
-        for (y, x, z), _ in voxels.items():
+        for coord in voxels:
+            y, x, z = coord
             voxel_coords.append([x, y, z])
-            if (y, x, z) in colors:
-                color = colors[(y, x, z)]
+            if coord in colors:
+                color = colors[coord]
                 voxel_colors.append(f"#{int(color[0]*255):02x}{int(color[1]*255):02x}{int(color[2]*255):02x}")
             else:
                 voxel_colors.append("#8888ff")  # Default color
@@ -463,13 +522,216 @@ class VoxelPreviewNode:
             }
         }
 
+class VoxelExportNode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "voxel_data": ("VOXEL_DATA",),
+                "filename_prefix": ("STRING", {"default": "voxel_model"}),
+                "smooth_mesh": (["true", "false"], {"default": "true"}),
+                "decimation_ratio": ("FLOAT", {"default": 0.5, "min": 0.1, "max": 1.0, "step": 0.05}),
+            }
+        }
+    
+    RETURN_TYPES = ()
+    FUNCTION = "export_obj"
+    OUTPUT_NODE = True
+    CATEGORY = "VoxelNodes"
+    
+    def export_obj(self, voxel_data, filename_prefix, smooth_mesh, decimation_ratio):
+        resolution = voxel_data["resolution"]
+        voxels = voxel_data["voxels"]
+        colors = voxel_data["colors"]
+        
+        # Convert to dense grid for meshing
+        voxel_grid = np.zeros((resolution, resolution, resolution), dtype=bool)
+        color_grid = np.zeros((resolution, resolution, resolution, 3))
+        
+        for coord in voxels:
+            y, x, z = coord
+            voxel_grid[y, x, z] = True
+            if coord in colors:
+                color_grid[y, x, z] = colors[coord]
+        
+        # Create mesh from voxels
+        try:
+            vertices, faces, vertex_colors = self.voxels_to_mesh(voxel_grid, color_grid)
+        except ImportError:
+            print("scikit-image not installed, using simple voxel meshing")
+            vertices, faces, vertex_colors = self.simple_voxels_to_mesh(voxel_grid, color_grid)
+        
+        # Create trimesh object
+        mesh = trimesh.Trimesh(vertices=vertices, faces=faces, vertex_colors=vertex_colors)
+        
+        # Apply mesh processing
+        if smooth_mesh == "true":
+            mesh = self.process_mesh(mesh, decimation_ratio)
+        
+        # Export to OBJ
+        output_dir = folder_paths.get_output_directory()
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Create unique filename
+        filename = f"{filename_prefix}_{int(time.time())}.obj"
+        file_path = os.path.join(output_dir, filename)
+        
+        # Export with vertex colors
+        with open(file_path, 'w') as f:
+            mesh.export(f, file_type='obj', include_color=True)
+        
+        # Create thumbnail preview
+        preview = self.create_mesh_preview(mesh)
+        preview_path = os.path.join(output_dir, filename.replace('.obj', '.png'))
+        preview.save(preview_path)
+        
+        return {
+            "ui": {
+                "text": [f"Exported OBJ: {filename}"],
+                "images": [{"filename": filename.replace('.obj', '.png'), "subfolder": "", "type": "output"}]
+            }
+        }
+    
+    def voxels_to_mesh(self, voxels, colors):
+        """Convert voxel grid to mesh with vertex colors using marching cubes"""
+        from skimage.measure import marching_cubes
+        verts, faces, _, _ = marching_cubes(voxels, level=0.5, spacing=(1,1,1))
+        
+        # Calculate vertex colors
+        vertex_colors = []
+        for vert in verts:
+            x, y, z = int(vert[0]), int(vert[1]), int(vert[2])
+            # Clip coordinates to grid bounds
+            x = max(0, min(x, voxels.shape[0]-1))
+            y = max(0, min(y, voxels.shape[1]-1))
+            z = max(0, min(z, voxels.shape[2]-1))
+            
+            if voxels[x, y, z]:
+                vertex_colors.append(colors[x, y, z])
+            else:
+                # If not found, use average of neighbors
+                vertex_colors.append([0.8, 0.8, 1.0])
+        
+        return verts, faces, np.array(vertex_colors)
+    
+    def simple_voxels_to_mesh(self, voxels, colors):
+        """Fallback meshing without marching cubes"""
+        vertices = []
+        faces = []
+        vertex_colors = []
+        
+        # Create a cube for each voxel
+        for z in range(voxels.shape[0]):
+            for y in range(voxels.shape[1]):
+                for x in range(voxels.shape[2]):
+                    if voxels[z, y, x]:
+                        # Define cube vertices
+                        v = [
+                            [x-0.5, y-0.5, z-0.5],
+                            [x+0.5, y-0.5, z-0.5],
+                            [x+0.5, y+0.5, z-0.5],
+                            [x-0.5, y+0.5, z-0.5],
+                            [x-0.5, y-0.5, z+0.5],
+                            [x+0.5, y-0.5, z+0.5],
+                            [x+0.5, y+0.5, z+0.5],
+                            [x-0.5, y+0.5, z+0.5]
+                        ]
+                        
+                        # Define cube faces (triangles)
+                        f = [
+                            [0, 1, 2], [2, 3, 0],  # bottom
+                            [4, 5, 6], [6, 7, 4],  # top
+                            [0, 1, 5], [5, 4, 0],  # front
+                            [2, 3, 7], [7, 6, 2],  # back
+                            [0, 3, 7], [7, 4, 0],  # left
+                            [1, 2, 6], [6, 5, 1]   # right
+                        ]
+                        
+                        # Add to mesh
+                        base_idx = len(vertices)
+                        vertices.extend(v)
+                        faces.extend([[base_idx + idx for idx in face] for face in f])
+                        
+                        # Add colors for each vertex
+                        color = colors[z, y, x]
+                        vertex_colors.extend([color] * 8)
+        
+        return np.array(vertices), np.array(faces), np.array(vertex_colors)
+    
+    def process_mesh(self, mesh, decimation_ratio):
+        """Apply mesh smoothing and simplification"""
+        try:
+            # Smooth mesh
+            trimesh.smoothing.filter_laplacian(mesh, iterations=3)
+            
+            # Simplify mesh
+            target_faces = int(len(mesh.faces) * decimation_ratio)
+            if target_faces > 100:  # Don't simplify too much
+                mesh = mesh.simplify_quadratic_decimation(target_faces)
+        except Exception as e:
+            print(f"Mesh processing error: {e}")
+        
+        return mesh
+    
+    def create_mesh_preview(self, mesh):
+        """Create 2D preview image of the mesh"""
+        from matplotlib import pyplot as plt
+        
+        # Create a simple render without 3D projection
+        fig, ax = plt.subplots(figsize=(6, 6))
+        
+        # Get bounding box
+        min_x, min_y = mesh.bounds[0][0], mesh.bounds[0][1]
+        max_x, max_y = mesh.bounds[1][0], mesh.bounds[1][1]
+        size_x = max_x - min_x
+        size_y = max_y - min_y
+        max_size = max(size_x, size_y)
+        
+        # Create a blank image
+        img_size = 256
+        img = np.zeros((img_size, img_size, 3), dtype=np.uint8)
+        
+        # Project vertices to 2D
+        vertices = mesh.vertices
+        projected = vertices[:, :2]  # Just use X and Y coordinates
+        
+        # Normalize to image coordinates
+        projected[:, 0] = (projected[:, 0] - min_x) / max_size * img_size
+        projected[:, 1] = (projected[:, 1] - min_y) / max_size * img_size
+        
+        # Draw mesh edges
+        for face in mesh.faces:
+            points = projected[face]
+            for i in range(3):
+                start = points[i]
+                end = points[(i + 1) % 3]
+                start_x = int(start[0])
+                start_y = img_size - int(start[1])  # Flip Y
+                end_x = int(end[0])
+                end_y = img_size - int(end[1])  # Flip Y
+                
+                # Draw line (this is simplified, use proper line drawing in production)
+                plt.plot([start_x, end_x], [start_y, end_y], 'b-', alpha=0.3)
+        
+        plt.axis('off')
+        plt.tight_layout(pad=0)
+        
+        # Create image
+        fig.canvas.draw()
+        img = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+        img = img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+        plt.close(fig)
+        
+        return Image.fromarray(img)
+
 # Node mappings
 NODE_CLASS_MAPPINGS = {
     "VoxelModelLoader": VoxelModelLoader,
     "DepthEstimationNode": DepthEstimationNode,
     "OptimizedVoxelizationNode": OptimizedVoxelizationNode,
     "ShapeCompletionNode": ShapeCompletionNode,
-    "VoxelPreviewNode": VoxelPreviewNode
+    "VoxelPreviewNode": VoxelPreviewNode,
+    "VoxelExportNode": VoxelExportNode
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -477,5 +739,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "DepthEstimationNode": "Depth Estimation",
     "OptimizedVoxelizationNode": "Voxelization (Optimized)",
     "ShapeCompletionNode": "3D Shape Completion",
-    "VoxelPreviewNode": "Voxel Preview"
+    "VoxelPreviewNode": "Voxel Preview",
+    "VoxelExportNode": "Export OBJ"
 }
